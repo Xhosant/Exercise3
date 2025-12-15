@@ -4,22 +4,22 @@
 #include <string.h>
 
 typedef struct MERGE_inlet {
-    Record topRecord;
+    Record* topRecord;
     CHUNK_RecordIterator recIt;
 } MERGE_inlet;
 
 int getNextRecordIndex(MERGE_inlet* inputArray, int arraySize) {
     int topIndex = 0;
-    while (topIndex < arraySize && inputArray[topIndex].topRecord.name=="") {
+    while (topIndex < arraySize && inputArray[topIndex].topRecord==NULL) {
         topIndex++;
     }
     if (topIndex == arraySize) {
        return -1;
     }
-    Record topRecord = inputArray[topIndex].topRecord;
+    Record* topRecord = inputArray[topIndex].topRecord;
     for (int i = topIndex+1; i<arraySize; i++) {
-        if (inputArray[i].topRecord.name=="") continue;
-        if (shouldSwap(&topRecord, &inputArray[i].topRecord)) {
+        if (inputArray[i].topRecord==NULL) continue;
+        if (shouldSwap(topRecord, inputArray[i].topRecord)) {
             topRecord = inputArray[i].topRecord;
             topIndex=i;
         }
@@ -27,9 +27,9 @@ int getNextRecordIndex(MERGE_inlet* inputArray, int arraySize) {
     return topIndex;
 }
 
-Record pop_inlet(MERGE_inlet in) {
-    Record rec = in.topRecord;
-    CHUNK_GetNextRecord(&in.recIt,&in.topRecord);
+Record* pop_inlet(MERGE_inlet in) {
+    Record* rec = in.topRecord;
+    CHUNK_GetNextRecord(&in.recIt,in.topRecord);
     return rec;
 }
 
@@ -62,7 +62,7 @@ void merge(int input_FileDesc, int chunkSize, int bWay, int output_FileDesc ){
         while (true) {
             int index = getNextRecordIndex(inputArray,bWay);
             if (index==-1) break;
-            Record rec = pop_inlet(inputArray[index]);
+            Record* rec = pop_inlet(inputArray[index]);
             //TODO add rec to output block
             //TODO if output block is now full, unpin it and replace it with the next output block
         }
