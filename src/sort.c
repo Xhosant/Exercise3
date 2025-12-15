@@ -28,6 +28,7 @@ void sort_FileInChunks(int file_desc, int numBlocksInChunk){
         sort_Chunk(ch);
         CHUNK_GetNext(&Cit, ch);
     }
+    free(ch);
 }
 
 void sort_Chunk(CHUNK* chunk){
@@ -58,4 +59,6 @@ void sort_Chunk(CHUNK* chunk){
             i++;
         }
     }
+    free(rec1);
+    free(rec2);
 }
