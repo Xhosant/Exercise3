@@ -1,4 +1,37 @@
+.PHONY: sort clean
+
 sort:
-	@echo " Compile sort_main ...";
-	gcc -g -I ./include/ -L ./lib/ -Wl,-rpath,./lib/ ./examples/sort_main.c ./src/record.c ./src/sort.c ./src/merge.c ./src/chunk.c -lbf lib/libbf.so -lhp_file lib/libhp_file.so -o ./build/sort_main -O2
-	@echo "BUILD_OUTPUT=build/sort_main"
+	@mkdir -p build
+	gcc -g -I ./include -L ./lib -Wl,-rpath,./lib \
+	./examples/sort_main.c ./src/record.c ./src/sort.c ./src/chunk.c ./src/merge.c \
+	-lbf -lhp_file -lm \
+	-o ./build/sort_main
+
+clean:
+	rm -rf build
+experiment:
+	@mkdir -p build
+	gcc -g -I ./include -L ./lib -Wl,-rpath,./lib \
+	./examples/experiment_main.c ./src/record.c ./src/sort.c ./src/chunk.c ./src/merge.c \
+	-lbf -lhp_file -lm \
+	-o ./build/experiment_main
+matrix:
+	@mkdir -p build
+	gcc -g -I ./include -L ./lib -Wl,-rpath,./lib \
+	./examples/experiment_matrix_main.c ./src/record.c ./src/sort.c ./src/chunk.c ./src/merge.c \
+	-lbf -lhp_file -lm \
+	-o ./build/matrix_main
+
+scaling:
+	@mkdir -p build
+	gcc -g -I ./include -L ./lib -Wl,-rpath,./lib \
+	./examples/experiment_scaling_main.c ./src/record.c ./src/sort.c ./src/chunk.c ./src/merge.c \
+	-lbf -lhp_file -lm \
+	-o ./build/scaling_main
+
+verify:
+	@mkdir -p build
+	gcc -g -I ./include -L ./lib -Wl,-rpath,./lib \
+	./examples/verify_sorted_main.c ./src/record.c ./src/sort.c ./src/chunk.c ./src/merge.c \
+	-lbf -lhp_file -lm \
+	-o ./build/verify_main
