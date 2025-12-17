@@ -165,3 +165,4 @@ BF_ErrorCode BF_Close();
 }
 #endif
 #endif // BF_H
+.
