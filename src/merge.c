@@ -27,46 +27,84 @@ int getNextRecordIndex(MERGE_inlet* inputArray, int arraySize) {
     return topIndex;
 }
 
-Record* pop_inlet(MERGE_inlet in) {
-    Record* rec = in.topRecord;
-    CHUNK_GetNextRecord(&in.recIt,in.topRecord);
-    return rec;
+Record* pop_inlet(MERGE_inlet *in) {
+    Record next;
+
+    Record *old = in->topRecord;
+
+    int rc = CHUNK_GetNextRecord(&in->recIt, &next);
+    if (rc == -1) {
+        in->topRecord = NULL;
+    } else if (rc == 0) {
+        *(in->topRecord) = next;   /* copy data */
+    } else {
+        in->topRecord = NULL;      /* error */
+        return NULL;
+    }
+
+    return old;
 }
 
 bool shouldSwap(Record* rec1,Record* rec2){
     int nameComp = strcmp(rec1->name, rec2->name);
-    if(nameComp > 0) return true;
-    if (nameComp < 0) return false;
-    nameComp = strcmp(rec1->surname, rec2->surname);
-    if(nameComp > 0) return true;
-    return false;
+    return nameComp > 0 || (nameComp == 0 && strcmp(rec1->surname, rec2->surname) > 0);
 }
 
 void merge(int input_FileDesc, int chunkSize, int bWay, int output_FileDesc ){
     MERGE_inlet* inputArray = (MERGE_inlet*)malloc(sizeof(MERGE_inlet)*bWay);
     CHUNK_Iterator cIt = CHUNK_CreateIterator(input_FileDesc, chunkSize);
     bool done = false;
-    CHUNK* chunk = malloc(sizeof(CHUNK));
+    CHUNK chunk;
     while (!done)
     {
         for (int i=0; i<bWay; i++) {
-            CHUNK_GetNext(&cIt, chunk);
-            if (chunk == NULL) {
-                bWay = i-1;
+            if (CHUNK_GetNext(&cIt, &chunk)==-1){
+                bWay = i;
                 done = true;
                 break;
             }
-            inputArray[i].recIt = CHUNK_CreateRecordIterator(chunk);
+            inputArray[i].recIt = CHUNK_CreateRecordIterator(&chunk);
+            inputArray[i].topRecord = malloc(sizeof(Record));
+            pop_inlet(&inputArray[i]);
         }
-        //TODO open output block
+
+        // Allocate the first output block
+        BF_Block* outBlock;
+        BF_Block_Init(&outBlock);
+        CALL_BF(BF_AllocateBlock(output_FileDesc, outBlock));
+
+        Record* outData = (Record*) BF_Block_GetData(outBlock);
+        int recordsInOutBlock = 0; // number of records written into current block
+
         while (true) {
             int index = getNextRecordIndex(inputArray,bWay);
             if (index==-1) break;
-            Record* rec = pop_inlet(inputArray[index]);
-            //TODO add rec to output block
-            //TODO if output block is now full, unpin it and replace it with the next output block
+            Record* rec = pop_inlet(&inputArray[index]);
+
+            // Copy record into output block
+            outData[recordsInOutBlock] = *rec;
+            recordsInOutBlock++;
+
+            // If the block is full, unpin it and allocate the next one
+            if (recordsInOutBlock >= HP_GetMaxRecordsInBlock(output_FileDesc)) {
+                BF_Block_SetDirty(outBlock);   // mark block dirty so it is written to disk
+                CALL_BF(BF_UnpinBlock(outBlock));
+
+                // Allocate next block
+                CALL_BF(BF_AllocateBlock(output_FileDesc, outBlock));
+                outData = (Record*) BF_Block_GetData(outBlock);
+                recordsInOutBlock = 0;
+            }
         }
+        for (int i=0; i<bWay; i++) {
+            free(inputArray[i].topRecord);
+        }
+
+        if (recordsInOutBlock > 0) {
+            BF_Block_SetDirty(outBlock);
+            CALL_BF(BF_UnpinBlock(outBlock));
+        }
+        BF_Block_Destroy(&outBlock);
     }
     free(inputArray);
-    free(chunk);
 }
