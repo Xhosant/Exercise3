@@ -1,209 +1,64 @@
-#include <merge.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <stdbool.h>
-#include <string.h>
-#include <unistd.h>
-#include <sort.h>
 
-typedef struct MERGE_inlet {
-    Record* topRecord;
-    CHUNK_RecordIterator recIt;
-} MERGE_inlet;
+#include "merge.h"
+#include "sort.h"
+#include "chunk.h"
+#include "hp_file.h"
 
-int getNextRecordIndex(MERGE_inlet* inputArray, int arraySize) {
-    int topIndex = 0;
-    while (topIndex < arraySize && inputArray[topIndex].topRecord==NULL) {
-        topIndex++;
-    }
-    if (topIndex == arraySize) {
-       return -1;
-    }
-    Record* topRecord = inputArray[topIndex].topRecord;
-    for (int i = topIndex+1; i<arraySize; i++) {
-        if (inputArray[i].topRecord==NULL) continue;
-        if (shouldSwap(topRecord, inputArray[i].topRecord)) {
-            topRecord = inputArray[i].topRecord;
-            topIndex=i;
+typedef struct {
+    Record *top;
+    CHUNK_RecordIterator it;
+} MergeInlet;
+
+static int findMin(MergeInlet *arr, int n) {
+    int idx = -1;
+
+    for (int i = 0; i < n; i++) {
+        if (arr[i].top == NULL) continue;
+        if (idx == -1 || shouldSwap(arr[idx].top, arr[i].top)) {
+            idx = i;
         }
     }
-    return topIndex;
+    return idx;
 }
 
-Record* pop_inlet(MERGE_inlet *in) {
-    Record next;
-
-    Record *old = in->topRecord;
-
-    int rc = CHUNK_GetNextRecord(&in->recIt, &next);
-    if (rc == -1) {
-        in->topRecord = NULL;
-    } else if (rc == 0) {
-        *(in->topRecord) = next;   /* copy data */
-    } else {
-        in->topRecord = NULL;      /* error */
-        return NULL;
-    }
-
-    return old;
-}
-
-bool shouldSwap(Record* rec1,Record* rec2){
-    int nameComp = strcmp(rec1->name, rec2->name);
-    return nameComp > 0 || (nameComp == 0 && strcmp(rec1->surname, rec2->surname) > 0);
-}
-
-static void inner_merge(int input_FileDesc, int chunkSize, int bWay, int output_FileDesc ){
-    MERGE_inlet* inputArray = (MERGE_inlet*)malloc(sizeof(MERGE_inlet)*bWay);
-    CHUNK_Iterator cIt = CHUNK_CreateIterator(input_FileDesc, chunkSize);
-    bool done = false;
-    CHUNK chunk;
-    while (!done)
-    {
-        for (int i=0; i<bWay; i++) {
-            if (CHUNK_GetNext(&cIt, &chunk)==-1){
-                bWay = i;
-                done = true;
-                break;
-            }
-            inputArray[i].recIt = CHUNK_CreateRecordIterator(&chunk);
-            inputArray[i].topRecord = malloc(sizeof(Record));
-            pop_inlet(&inputArray[i]);
-        }
-
-        // Allocate the first output block
-        BF_Block* outBlock;
-        BF_Block_Init(&outBlock);
-        CALL_BF(BF_AllocateBlock(output_FileDesc, outBlock));
-
-        Record* outData = (Record*) BF_Block_GetData(outBlock);
-        int recordsInOutBlock = 0; // number of records written into current block
-
-        while (true) {
-            int index = getNextRecordIndex(inputArray,bWay);
-            if (index==-1) break;
-            Record* rec = pop_inlet(&inputArray[index]);
-
-            // Copy record into output block
-            outData[recordsInOutBlock] = *rec;
-            recordsInOutBlock++;
-
-            // If the block is full, unpin it and allocate the next one
-            if (recordsInOutBlock >= HP_GetMaxRecordsInBlock(output_FileDesc)) {
-                BF_Block_SetDirty(outBlock);   // mark block dirty so it is written to disk
-                CALL_BF(BF_UnpinBlock(outBlock));
-
-                // Allocate next block
-                CALL_BF(BF_AllocateBlock(output_FileDesc, outBlock));
-                outData = (Record*) BF_Block_GetData(outBlock);
-                recordsInOutBlock = 0;
-            }
-        }
-        for (int i=0; i<bWay; i++) {
-            free(inputArray[i].topRecord);
-        }
-
-        if (recordsInOutBlock > 0) {
-            BF_Block_SetDirty(outBlock);
-            CALL_BF(BF_UnpinBlock(outBlock));
-        }
-        BF_Block_Destroy(&outBlock);
-    }
-    free(inputArray);
-}
-
-// --- Merge wrapper: sorts then repeatedly merges ---
 void merge(int input_FileDesc, int chunkSize, int bWay, int output_FileDesc) {
-    int currentInput;
-    int currentChunkSize = chunkSize;
-    int pass = 0;
+    CHUNK_Iterator cIt = CHUNK_CreateIterator(input_FileDesc, chunkSize);
+    MergeInlet *inlets = malloc(sizeof(MergeInlet) * bWay);
+    CHUNK chunk;
 
-    // --- Step 0a: copy input file to temporary file ---
-    char tempInput[256];
-    snprintf(tempInput, sizeof(tempInput), "merge_pass_0_input.tmp");
-
-    int tempInputDesc;
-    if (HP_CreateFile(tempInput) != 0) {
-        fprintf(stderr, "Error creating temporary input file %s\n", tempInput);
-        exit(EXIT_FAILURE);
-    }
-    if (HP_OpenFile(tempInput, &tempInputDesc) != 0) {
-        fprintf(stderr, "Error opening temporary input file %s\n", tempInput);
-        exit(EXIT_FAILURE);
-    }
-
-    int lastBlock = HP_GetIdOfLastBlock(input_FileDesc);
-    for (int blk = 0; blk <= lastBlock; blk++) {
-        int numRecords = HP_GetRecordCounter(input_FileDesc, blk);
-        Record rec;
-        for (int i = 0; i < numRecords; i++) {
-            HP_GetRecord(input_FileDesc, blk, i, &rec);
-            HP_InsertEntry(tempInputDesc, rec);
-        }
-    }
-    HP_CloseFile(tempInputDesc);
-
-    currentInput = HP_OpenFile(tempInput, &tempInputDesc) == 0 ? tempInputDesc : -1;
-    if (currentInput == -1) {
-        fprintf(stderr, "Error reopening temporary input file\n");
-        exit(EXIT_FAILURE);
-    }
-
-    // --- Step 0b: initial chunk sort ---
-    sort_FileInChunks(tempInputDesc, currentChunkSize);
-
-    // --- Iterative merge passes ---
     while (1) {
-        char tempOutput[256];
-        snprintf(tempOutput, sizeof(tempOutput), "merge_pass_%d.tmp", pass);
+        int active = 0;
 
-        int outputDesc;
-        if (HP_CreateFile(tempOutput) != 0) {
-            fprintf(stderr, "Error creating temp output file %s\n", tempOutput);
-            exit(EXIT_FAILURE);
-        }
-        if (HP_OpenFile(tempOutput, &outputDesc) != 0) {
-            fprintf(stderr, "Error opening temp output file %s\n", tempOutput);
-            exit(EXIT_FAILURE);
-        }
+        for (int i = 0; i < bWay; i++) {
+            if (CHUNK_GetNext(&cIt, &chunk) == -1) break;
 
-        inner_merge(currentInput, currentChunkSize, bWay, outputDesc);
+            inlets[i].it = CHUNK_CreateRecordIterator(&chunk);
+            inlets[i].top = malloc(sizeof(Record));
 
-        HP_CloseFile(currentInput);
-
-        // Delete previous temporary input file
-        if (pass == 0) {
-            unlink(tempInput);
-        } else {
-            char prevTemp[256];
-            snprintf(prevTemp, sizeof(prevTemp), "merge_pass_%d.tmp", pass - 1);
-            unlink(prevTemp);
-        }
-
-        lastBlock = HP_GetIdOfLastBlock(outputDesc);
-
-        if (lastBlock + 1 <= currentChunkSize) {
-            // Fully merged: copy directly into the provided output_FileDesc
-            for (int blk = 0; blk <= lastBlock; blk++) {
-                int numRecords = HP_GetRecordCounter(outputDesc, blk);
-                Record rec;
-                for (int i = 0; i < numRecords; i++) {
-                    HP_GetRecord(outputDesc, blk, i, &rec);
-                    HP_InsertEntry(output_FileDesc, rec);
-                }
+            if (CHUNK_GetNextRecord(&inlets[i].it, inlets[i].top) != 0) {
+                free(inlets[i].top);
+                inlets[i].top = NULL;
             }
-
-            HP_CloseFile(outputDesc);
-
-            // Delete the last temporary merge output
-            char lastTemp[256];
-            snprintf(lastTemp, sizeof(lastTemp), "merge_pass_%d.tmp", pass);
-            unlink(lastTemp);
-
-            break;
+            active++;
         }
 
-        currentInput = outputDesc;
-        currentChunkSize *= bWay;
-        pass++;
+        if (active == 0) break;
+
+        while (1) {
+            int idx = findMin(inlets, active);
+            if (idx == -1) break;
+
+            HP_InsertEntry(output_FileDesc, *inlets[idx].top);
+
+            if (CHUNK_GetNextRecord(&inlets[idx].it, inlets[idx].top) != 0) {
+                free(inlets[idx].top);
+                inlets[idx].top = NULL;
+            }
+        }
     }
+
+    free(inlets);
 }
