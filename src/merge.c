@@ -2,6 +2,8 @@
 #include <stdio.h>
 #include <stdbool.h>
 #include <string.h>
+#include <unistd.h>
+#include <sort.h>
 
 typedef struct MERGE_inlet {
     Record* topRecord;
@@ -50,7 +52,7 @@ bool shouldSwap(Record* rec1,Record* rec2){
     return nameComp > 0 || (nameComp == 0 && strcmp(rec1->surname, rec2->surname) > 0);
 }
 
-void merge(int input_FileDesc, int chunkSize, int bWay, int output_FileDesc ){
+static void inner_merge(int input_FileDesc, int chunkSize, int bWay, int output_FileDesc ){
     MERGE_inlet* inputArray = (MERGE_inlet*)malloc(sizeof(MERGE_inlet)*bWay);
     CHUNK_Iterator cIt = CHUNK_CreateIterator(input_FileDesc, chunkSize);
     bool done = false;
@@ -107,4 +109,101 @@ void merge(int input_FileDesc, int chunkSize, int bWay, int output_FileDesc ){
         BF_Block_Destroy(&outBlock);
     }
     free(inputArray);
+}
+
+// --- Merge wrapper: sorts then repeatedly merges ---
+void merge(int input_FileDesc, int chunkSize, int bWay, int output_FileDesc) {
+    int currentInput;
+    int currentChunkSize = chunkSize;
+    int pass = 0;
+
+    // --- Step 0a: copy input file to temporary file ---
+    char tempInput[256];
+    snprintf(tempInput, sizeof(tempInput), "merge_pass_0_input.tmp");
+
+    int tempInputDesc;
+    if (HP_CreateFile(tempInput) != 0) {
+        fprintf(stderr, "Error creating temporary input file %s\n", tempInput);
+        exit(EXIT_FAILURE);
+    }
+    if (HP_OpenFile(tempInput, &tempInputDesc) != 0) {
+        fprintf(stderr, "Error opening temporary input file %s\n", tempInput);
+        exit(EXIT_FAILURE);
+    }
+
+    int lastBlock = HP_GetIdOfLastBlock(input_FileDesc);
+    for (int blk = 0; blk <= lastBlock; blk++) {
+        int numRecords = HP_GetRecordCounter(input_FileDesc, blk);
+        Record rec;
+        for (int i = 0; i < numRecords; i++) {
+            HP_GetRecord(input_FileDesc, blk, i, &rec);
+            HP_InsertEntry(tempInputDesc, rec);
+        }
+    }
+    HP_CloseFile(tempInputDesc);
+
+    currentInput = HP_OpenFile(tempInput, &tempInputDesc) == 0 ? tempInputDesc : -1;
+    if (currentInput == -1) {
+        fprintf(stderr, "Error reopening temporary input file\n");
+        exit(EXIT_FAILURE);
+    }
+
+    // --- Step 0b: initial chunk sort ---
+    sort_FileInChunks(tempInputDesc, currentChunkSize);
+
+    // --- Iterative merge passes ---
+    while (1) {
+        char tempOutput[256];
+        snprintf(tempOutput, sizeof(tempOutput), "merge_pass_%d.tmp", pass);
+
+        int outputDesc;
+        if (HP_CreateFile(tempOutput) != 0) {
+            fprintf(stderr, "Error creating temp output file %s\n", tempOutput);
+            exit(EXIT_FAILURE);
+        }
+        if (HP_OpenFile(tempOutput, &outputDesc) != 0) {
+            fprintf(stderr, "Error opening temp output file %s\n", tempOutput);
+            exit(EXIT_FAILURE);
+        }
+
+        inner_merge(currentInput, currentChunkSize, bWay, outputDesc);
+
+        HP_CloseFile(currentInput);
+
+        // Delete previous temporary input file
+        if (pass == 0) {
+            unlink(tempInput);
+        } else {
+            char prevTemp[256];
+            snprintf(prevTemp, sizeof(prevTemp), "merge_pass_%d.tmp", pass - 1);
+            unlink(prevTemp);
+        }
+
+        lastBlock = HP_GetIdOfLastBlock(outputDesc);
+
+        if (lastBlock + 1 <= currentChunkSize) {
+            // Fully merged: copy directly into the provided output_FileDesc
+            for (int blk = 0; blk <= lastBlock; blk++) {
+                int numRecords = HP_GetRecordCounter(outputDesc, blk);
+                Record rec;
+                for (int i = 0; i < numRecords; i++) {
+                    HP_GetRecord(outputDesc, blk, i, &rec);
+                    HP_InsertEntry(output_FileDesc, rec);
+                }
+            }
+
+            HP_CloseFile(outputDesc);
+
+            // Delete the last temporary merge output
+            char lastTemp[256];
+            snprintf(lastTemp, sizeof(lastTemp), "merge_pass_%d.tmp", pass);
+            unlink(lastTemp);
+
+            break;
+        }
+
+        currentInput = outputDesc;
+        currentChunkSize *= bWay;
+        pass++;
+    }
 }
