@@ -2,88 +2,107 @@
 #include <stdlib.h>
 #include <unistd.h>
 
-#include "merge.h"
-#include "hp_file.h"
 #include "bf.h"
+#include "hp_file.h"
 #include "record.h"
+#include "sort.h"
+#include "merge.h"
 
-#define RECORDS_NUM 500 // you can change it if you want
-#define FILE_NAME "data.db"
-#define OUT_NAME "out"
+#define RECORDS_NUM 500
+#define INPUT_NAME  "data.db"
 
-int createAndPopulateHeapFile(char* filename);
-void printHeapFile(int file_desc);
+static int createAndPopulateHeapFile(const char* filename);
+static void printHeapFile(int file_desc, int maxPrint);
+
+static void make_temp_name(char *buf, size_t n, int pass) {
+    snprintf(buf, n, "tmp_pass_%d.db", pass);
+}
 
 int main() {
-  int chunkSize=5;
-  int bWay= 4;
-  int outputDesc;
+    int chunkSize = 5;   /* in blocks */
+    int bWay = 4;
 
-  // Initialize buffer manager
-  BF_Init(LRU);
+    BF_Init(LRU);
 
-  // Remove existing files
-  unlink(FILE_NAME);
-  unlink(OUT_NAME);
+    unlink(INPUT_NAME);
 
-  // Create output file
-  HP_CreateFile(OUT_NAME);
-  HP_OpenFile(OUT_NAME, &outputDesc);
+    int inDesc = createAndPopulateHeapFile(INPUT_NAME);
 
-  // Create and populate input file
-  int file_desc = createAndPopulateHeapFile(FILE_NAME);
+    /* PASS 0: sort each chunk in-place */
+    sort_FileInChunks(inDesc, chunkSize);
 
-  // Run merge sort
-  merge(file_desc, chunkSize, bWay, outputDesc);
+    /* MULTI-PASS MERGE:
+       runSizeBlocks = chunkSize initially
+       each pass: merge bWay runs -> new runSizeBlocks *= bWay
+    */
+    int runSizeBlocks = chunkSize;
+    int pass = 1;
 
-  // Print sorted output
-  printf("=== Sorted Records ===\n");
-  printHeapFile(outputDesc);
+    while (1) {
+        int lastBlock = HP_GetIdOfLastBlock(inDesc);
+        int dataBlocks = lastBlock; /* block0 is metadata, blocks [1..lastBlock] are data */
 
-  // Close files
-  HP_CloseFile(file_desc);
-  HP_CloseFile(outputDesc);
+        if (dataBlocks <= runSizeBlocks) {
+            /* one run remains => fully sorted */
+            break;
+        }
 
-  // Close buffer manager
-  CALL_BF(BF_Close());
+        char outName[64];
+        make_temp_name(outName, sizeof(outName), pass);
+        unlink(outName);
 
-  return 0;
-}
+        int outDesc;
+        HP_CreateFile(outName);
+        HP_OpenFile(outName, &outDesc);
 
-int createAndPopulateHeapFile(char* filename){
-  HP_CreateFile(filename);
-  
-  int file_desc;
-  HP_OpenFile(filename, &file_desc);
+        merge(inDesc, runSizeBlocks, bWay, outDesc);
 
-  Record record;
-  srand(12569874);
-  for (int id = 0; id < RECORDS_NUM; ++id)
-  {
-    record = randomRecord();
-    HP_InsertEntry(file_desc, record);
-  }
-  return file_desc;
-}
+        HP_CloseFile(inDesc);
+        inDesc = outDesc;
 
-void printHeapFile(int file_desc) {
-  int maxPrint = -1; //-1 for no limit
-  int printed = 0;
-  int lastBlock = HP_GetIdOfLastBlock(file_desc);
-
-  for (int blk = 1; blk <= lastBlock && (maxPrint==-1 || printed < maxPrint); blk++) {
-    int numRecords = HP_GetRecordCounter(file_desc, blk);
-    for (int i = 0; i < numRecords && (maxPrint==-1 || printed < maxPrint); i++) {
-      Record rec;
-      if (HP_GetRecord(file_desc, blk, i, &rec) == 0) {
-        printf("Record #%-3d: %-15s %-15s %d\n", printed, rec.name, rec.surname, rec.id);
-        printed++;
-      }
+        runSizeBlocks *= bWay;
+        pass++;
     }
-    HP_Unpin(file_desc, blk);
-  }
 
-  if (printed == maxPrint) {
-    printf("... (output truncated, first %d records shown)\n", maxPrint);
-  }
+    printf("=== Sorted Records (GLOBAL) ===\n");
+    printHeapFile(inDesc, -1);
+
+    HP_CloseFile(inDesc);
+    CALL_BF(BF_Close());
+    return 0;
+}
+
+static int createAndPopulateHeapFile(const char* filename) {
+    HP_CreateFile((char*)filename);
+
+    int fd;
+    HP_OpenFile((char*)filename, &fd);
+
+    srand(12569874);
+    for (int i = 0; i < RECORDS_NUM; i++) {
+        Record record = randomRecord();
+        HP_InsertEntry(fd, record);
+    }
+
+    return fd;
+}
+
+static void printHeapFile(int file_desc, int maxPrint) {
+    int printed = 0;
+    int lastBlock = HP_GetIdOfLastBlock(file_desc);
+
+    for (int blk = 1; blk <= lastBlock && (maxPrint == -1 || printed < maxPrint); blk++) {
+        int numRecords = HP_GetRecordCounter(file_desc, blk);
+
+        for (int i = 0; i < numRecords && (maxPrint == -1 || printed < maxPrint); i++) {
+            Record rec;
+            if (HP_GetRecord(file_desc, blk, i, &rec) == 0) {
+                HP_Unpin(file_desc, blk);
+                printf("Record: %-10s %-14s %d\n", rec.name, rec.surname, rec.id);
+                printed++;
+            } else {
+                HP_Unpin(file_desc, blk);
+            }
+        }
+    }
 }
