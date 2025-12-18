@@ -1,7 +1,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include "record.h"
+#include <record.h>
 
 const char* names[] = {
     "Yannis", "Christofos", "Sofia", "Marianna", "Vagelis", "Maria", "Iosif", "Dionisis", "Konstantina",
@@ -18,7 +18,7 @@ const char* names[] = {
 };
 
 const char* surnames[] = {
-    "Ioannidis", "Svingos", "Karvounari", "Rezkalla", "Nikolopoulos", "Berreta", "Koronis", "Gaitanis",
+    "Ioannidis", "Svingos", "Karvounari", "Rezkalla", "Nikolopoulos", "Berreta", "Koronis", "Gaitanis", 
     "Oikonomou", "Mailis", "Michas", "Halatsis", "Papadopoulos", "Pappas", "Georgiou", "Nikolaidis", "Katsaros",
     "Zervas", "Livanos", "Makris", "Papageorgiou", "Sarantopoulos", "Konstantinidis", "Antonopoulos", "Petrakis",
     "Apostolou", "Daskalakis", "Manolopoulos", "Papadakis", "Stamatakis", "Sotiriou", "Economou", "Tsilimparis",
@@ -42,32 +42,26 @@ const char* cities[] = {
     "Sydney", "Toronto", "Dubai", "Mumbai", "Beijing", "Moscow", "Cairo", "RioDeJaneiro", "BuenosAires", "MexicoCity"
 };
 
-static int id_gen = 0;
+static int id = 0;
 
-static void copy_fit(char *dst, size_t dst_size, const char *src) {
-    if (dst_size == 0) return;
-    strncpy(dst, src, dst_size - 1);
-    dst[dst_size - 1] = '\0';
-}
-
-Record randomRecord() {
+Record randomRecord(){
     Record record;
-    record.id = id_gen++;
-
+    // create a record
+    record.id = id++;
     int r = rand() % 100;
-    copy_fit(record.name, sizeof(record.name), names[r]);
-
-    r = rand() % 82;
-    copy_fit(record.surname, sizeof(record.surname), surnames[r]);
-
+    memcpy(record.name, names[r], strlen(names[r]) + 1);
+    r = rand() % 82;    
+    memcpy(record.surname, surnames[r], strlen(surnames[r]) + 1);
     r = rand() % 50;
-    copy_fit(record.city, sizeof(record.city), cities[r]);
-
-    record.delimiter[0] = '\n';
-    record.delimiter[1] = '\0';
+    memcpy(record.city, cities[r], strlen(cities[r]) + 1);
+    memcpy(record.delimiter, "\n", strlen("\n") + 1);
     return record;
 }
 
-void printRecord(Record record) {
-    printf("%d,%s,%s,%s\n", record.id, record.name, record.surname, record.city);
+void printRecord(Record record){
+    printf("%d,%s,%s,%s\n",record.id,record.name,record.surname,record.city);
+
 }
+
+
+
