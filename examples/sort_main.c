@@ -66,19 +66,21 @@ int createAndPopulateHeapFile(char* filename){
   return file_desc;
 }
 
-void printHeapFile(int file_desc, int maxPrint = -1) {
+void printHeapFile(int file_desc) {
+  int maxPrint = -1; //-1 for no limit
   int printed = 0;
   int lastBlock = HP_GetIdOfLastBlock(file_desc);
 
-  for (int blk = 0; blk <= lastBlock && (maxPrint==-1 || printed < maxPrint); blk++) {
+  for (int blk = 1; blk <= lastBlock && (maxPrint==-1 || printed < maxPrint); blk++) {
     int numRecords = HP_GetRecordCounter(file_desc, blk);
     for (int i = 0; i < numRecords && (maxPrint==-1 || printed < maxPrint); i++) {
       Record rec;
       if (HP_GetRecord(file_desc, blk, i, &rec) == 0) {
-        printf("Record: %-10s %-10s %d\n", rec.name, rec.surname, rec.id);
+        printf("Record #%-3d: %-15s %-15s %d\n", printed, rec.name, rec.surname, rec.id);
         printed++;
       }
     }
+    HP_Unpin(file_desc, blk);
   }
 
   if (printed == maxPrint) {

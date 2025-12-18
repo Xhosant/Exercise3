@@ -10,6 +10,11 @@ typedef struct MERGE_inlet {
     CHUNK_RecordIterator recIt;
 } MERGE_inlet;
 
+bool merge_shouldSwap(Record* rec1,Record* rec2){
+    int nameComp = strcmp(rec1->name, rec2->name);
+    return nameComp > 0 || (nameComp == 0 && strcmp(rec1->surname, rec2->surname) > 0);
+}
+
 int getNextRecordIndex(MERGE_inlet* inputArray, int arraySize) {
     int topIndex = 0;
     while (topIndex < arraySize && inputArray[topIndex].topRecord==NULL) {
@@ -21,7 +26,7 @@ int getNextRecordIndex(MERGE_inlet* inputArray, int arraySize) {
     Record* topRecord = inputArray[topIndex].topRecord;
     for (int i = topIndex+1; i<arraySize; i++) {
         if (inputArray[i].topRecord==NULL) continue;
-        if (shouldSwap(topRecord, inputArray[i].topRecord)) {
+        if (merge_shouldSwap(topRecord, inputArray[i].topRecord)) {
             topRecord = inputArray[i].topRecord;
             topIndex=i;
         }
@@ -32,9 +37,16 @@ int getNextRecordIndex(MERGE_inlet* inputArray, int arraySize) {
 Record* pop_inlet(MERGE_inlet *in) {
     Record next;
 
+    int lastBlockID = in->recIt.currentBlockId;
+
     Record *old = in->topRecord;
 
     int rc = CHUNK_GetNextRecord(&in->recIt, &next);
+
+    if (lastBlockID != in->recIt.currentBlockId) {
+        HP_Unpin(in->recIt.chunk.file_desc, lastBlockID);
+    }
+
     if (rc == -1) {
         in->topRecord = NULL;
     } else if (rc == 0) {
@@ -47,11 +59,6 @@ Record* pop_inlet(MERGE_inlet *in) {
     return old;
 }
 
-bool shouldSwap(Record* rec1,Record* rec2){
-    int nameComp = strcmp(rec1->name, rec2->name);
-    return nameComp > 0 || (nameComp == 0 && strcmp(rec1->surname, rec2->surname) > 0);
-}
-
 static void inner_merge(int input_FileDesc, int chunkSize, int bWay, int output_FileDesc ){
     MERGE_inlet* inputArray = (MERGE_inlet*)malloc(sizeof(MERGE_inlet)*bWay);
     CHUNK_Iterator cIt = CHUNK_CreateIterator(input_FileDesc, chunkSize);
@@ -59,7 +66,13 @@ static void inner_merge(int input_FileDesc, int chunkSize, int bWay, int output_
     CHUNK chunk;
     while (!done)
     {
+        for (int j=chunk.from_BlockId; j<=chunk.to_BlockId; j++) {
+            HP_Unpin(input_FileDesc, j);
+        }
         for (int i=0; i<bWay; i++) {
+            if (i>0) {
+
+            }
             if (CHUNK_GetNext(&cIt, &chunk)==-1){
                 bWay = i;
                 done = true;
@@ -71,11 +84,7 @@ static void inner_merge(int input_FileDesc, int chunkSize, int bWay, int output_
         }
 
         // Allocate the first output block
-        BF_Block* outBlock;
-        BF_Block_Init(&outBlock);
-        CALL_BF(BF_AllocateBlock(output_FileDesc, outBlock));
 
-        Record* outData = (Record*) BF_Block_GetData(outBlock);
         int recordsInOutBlock = 0; // number of records written into current block
 
         while (true) {
@@ -84,17 +93,12 @@ static void inner_merge(int input_FileDesc, int chunkSize, int bWay, int output_
             Record* rec = pop_inlet(&inputArray[index]);
 
             // Copy record into output block
-            outData[recordsInOutBlock] = *rec;
+            HP_InsertEntry(output_FileDesc, *rec);
             recordsInOutBlock++;
 
             // If the block is full, unpin it and allocate the next one
             if (recordsInOutBlock >= HP_GetMaxRecordsInBlock(output_FileDesc)) {
-                BF_Block_SetDirty(outBlock);   // mark block dirty so it is written to disk
-                CALL_BF(BF_UnpinBlock(outBlock));
-
-                // Allocate next block
-                CALL_BF(BF_AllocateBlock(output_FileDesc, outBlock));
-                outData = (Record*) BF_Block_GetData(outBlock);
+                HP_Unpin(output_FileDesc, HP_GetIdOfLastBlock(output_FileDesc));
                 recordsInOutBlock = 0;
             }
         }
@@ -102,11 +106,7 @@ static void inner_merge(int input_FileDesc, int chunkSize, int bWay, int output_
             free(inputArray[i].topRecord);
         }
 
-        if (recordsInOutBlock > 0) {
-            BF_Block_SetDirty(outBlock);
-            CALL_BF(BF_UnpinBlock(outBlock));
-        }
-        BF_Block_Destroy(&outBlock);
+        HP_Unpin(output_FileDesc, HP_GetIdOfLastBlock(output_FileDesc));
     }
     free(inputArray);
 }
@@ -120,7 +120,7 @@ void merge(int input_FileDesc, int chunkSize, int bWay, int output_FileDesc) {
     // --- Step 0a: copy input file to temporary file ---
     char tempInput[256];
     snprintf(tempInput, sizeof(tempInput), "merge_pass_0_input.tmp");
-
+    unlink(tempInput);
     int tempInputDesc;
     if (HP_CreateFile(tempInput) != 0) {
         fprintf(stderr, "Error creating temporary input file %s\n", tempInput);
@@ -132,14 +132,16 @@ void merge(int input_FileDesc, int chunkSize, int bWay, int output_FileDesc) {
     }
 
     int lastBlock = HP_GetIdOfLastBlock(input_FileDesc);
-    for (int blk = 0; blk <= lastBlock; blk++) {
+    for (int blk = 1; blk <= lastBlock; blk++) {
         int numRecords = HP_GetRecordCounter(input_FileDesc, blk);
         Record rec;
         for (int i = 0; i < numRecords; i++) {
             HP_GetRecord(input_FileDesc, blk, i, &rec);
             HP_InsertEntry(tempInputDesc, rec);
         }
+        HP_Unpin(input_FileDesc, blk);
     }
+
     HP_CloseFile(tempInputDesc);
 
     currentInput = HP_OpenFile(tempInput, &tempInputDesc) == 0 ? tempInputDesc : -1;
@@ -156,6 +158,7 @@ void merge(int input_FileDesc, int chunkSize, int bWay, int output_FileDesc) {
         char tempOutput[256];
         snprintf(tempOutput, sizeof(tempOutput), "merge_pass_%d.tmp", pass);
 
+        unlink(tempOutput);
         int outputDesc;
         if (HP_CreateFile(tempOutput) != 0) {
             fprintf(stderr, "Error creating temp output file %s\n", tempOutput);
@@ -170,26 +173,18 @@ void merge(int input_FileDesc, int chunkSize, int bWay, int output_FileDesc) {
 
         HP_CloseFile(currentInput);
 
-        // Delete previous temporary input file
-        if (pass == 0) {
-            unlink(tempInput);
-        } else {
-            char prevTemp[256];
-            snprintf(prevTemp, sizeof(prevTemp), "merge_pass_%d.tmp", pass - 1);
-            unlink(prevTemp);
-        }
-
         lastBlock = HP_GetIdOfLastBlock(outputDesc);
 
         if (lastBlock + 1 <= currentChunkSize) {
             // Fully merged: copy directly into the provided output_FileDesc
-            for (int blk = 0; blk <= lastBlock; blk++) {
+            for (int blk = 1; blk <= lastBlock; blk++) {
                 int numRecords = HP_GetRecordCounter(outputDesc, blk);
                 Record rec;
                 for (int i = 0; i < numRecords; i++) {
                     HP_GetRecord(outputDesc, blk, i, &rec);
                     HP_InsertEntry(output_FileDesc, rec);
                 }
+                HP_Unpin(outputDesc, blk);
             }
 
             HP_CloseFile(outputDesc);
@@ -200,6 +195,14 @@ void merge(int input_FileDesc, int chunkSize, int bWay, int output_FileDesc) {
             unlink(lastTemp);
 
             break;
+        }
+        // Delete previous temporary input file
+        if (pass == 0) {
+            unlink(tempInput);
+        } else {
+            char prevTemp[256];
+            snprintf(prevTemp, sizeof(prevTemp), "merge_pass_%d.tmp", pass - 1);
+            unlink(prevTemp);
         }
 
         currentInput = outputDesc;

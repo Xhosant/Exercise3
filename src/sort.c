@@ -15,6 +15,9 @@ void sort_FileInChunks(int file_desc, int numBlocksInChunk){
     int rc = CHUNK_GetNext(&Cit, &ch);
     while(rc != -1) {
         sort_Chunk(&ch);
+        for (int i = ch.from_BlockId; i <= ch.to_BlockId; i++) {
+            HP_Unpin(file_desc,i);
+        }
         rc = CHUNK_GetNext(&Cit, &ch);
     }
 
